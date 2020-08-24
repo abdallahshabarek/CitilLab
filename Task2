@@ -1,0 +1,48 @@
+-- Create a table for Intersection file
+CREATE TABLE public.midpoint (id int, SEGMENT text,xcoord double precision,ycoord double precision);
+
+-- Create a table for midpoint2 file 
+CREATE TABLE public.intersect (id int,poi_id bigint,SEGMENT text,RESTAURANT integer,midpoint2_xcoord double precision,midpoint2_ycoord double precision);
+
+-- Import the network to PostGIS
+-- Change the "sacramento_network" shapefile into a structured graphical database. Adding a network tolerance of 0.0001
+ALTER TABLE sacramento_network ADD COLUMN source INTEGER;  
+ALTER TABLE sacramento_network ADD COLUMN target INTEGER;  
+ALTER TABLE sacramento_network ADD COLUMN length FLOAT8; 
+SELECT pgr_createTopology('sacramento_network',0.0001,'geom','gid');
+UPDATE sacramento_network SET length = ST_Length(geom::geography);
+
+-- Perform a cross product to prepare the pairs between segments and nodes
+Select*
+Into results2
+From (SELECT a.SEGMENT,a.xcoord,a.ycoord,b.poi_id,b.SEGMENT as SEGMENT Restaurant,b.RESTAURANT,b.midpoint2_xcoord,b.midpoint2_ycoord
+  FROM midpoint as a
+  cross join intersect as b) as c
+
+-- Perform dijkstra analysis with an assumption of the roads going on both directions. If the network goes on one direction, the forth component of pgr_dijkstraCost should be True instead
+Select * Into finalresults
+from pgr_dijkstraCost(
+'select gid as id, source, target, length as cost from sacramento_network'
+,array(select sacramento_network.source from sacramento_network Inner join results2 on results2.segment = sacramento_network.segment)
+,array(select sacramento_network.target from sacramento_network Inner join results2 on results2.segment_restaurant = sacramento_network.segment)
+,false)
+
+-- After fixing the source & target nodes to reflect the segment of each one we continue to the next step
+-- Finding the count of restaurants that are 0.5 miles away throught the network paths
+select d.segment, case when e.RESTAURANT_COUNT is null then 0 else RESTAURANT_COUNT end as RESTAURANT_COUNT 
+Into public.FinalTask2
+from sacramento_network as d
+left join(
+select c.segment, count(poi_id) as RESTAURANT_COUNT
+from (select a.SEGMENT, a.xcoord, a.ycoord, a.poi_id, 
+a.SEGMENT_Restaurant, a.RESTAURANT, a.midpoint2_xcoord, a.midpoint2_ycoord,
+case when a.SEGMENT=a.SEGMENT_Restaurant then 0
+     when b.agg_cost is null then 1000000
+     else b.agg_cost
+	 End as distance_m
+from results2 as a 
+left join finalresults as b
+on a.SEGMENT = b.segment and a.SEGMENT_Restaurant = b.SEGMENT_Restaurant) as c
+where distance_m<805 /*805 meters = 0.5 miles*/
+group by c.segment) as e
+on d.segment = e.segment
